@@ -175,9 +175,10 @@ const ErrCodeInvalidTimezone = 2003
 // HTTPError holds the http error description
 func (err ErrInvalidTimezone) HTTPError() web.HTTPError {
 	return web.HTTPError{
-		HTTPCode: http.StatusBadRequest,
-		Code:     ErrCodeInvalidTimezone,
-		Message:  fmt.Sprintf("The timezone '%s' is invalid", err.Name),
+		HTTPCode:   http.StatusBadRequest,
+		Code:       ErrCodeInvalidTimezone,
+		Message:    fmt.Sprintf("The timezone '%s' is invalid", err.Name),
+		I18nParams: map[string]string{"timezone": err.Name},
 	}
 }
 
@@ -535,6 +536,34 @@ func (err *ErrProjectViewDoesNotExist) HTTPError() web.HTTPError {
 	}
 }
 
+// ErrProjectHasNoBackground represents an error where a project has no background set.
+type ErrProjectHasNoBackground struct {
+	ProjectID int64
+}
+
+// IsErrProjectHasNoBackground checks if an error is ErrProjectHasNoBackground.
+func IsErrProjectHasNoBackground(err error) bool {
+	_, ok := err.(*ErrProjectHasNoBackground)
+	return ok
+}
+
+func (err *ErrProjectHasNoBackground) Error() string {
+	return fmt.Sprintf("Project has no background [ProjectID: %d]", err.ProjectID)
+}
+
+// ErrCodeProjectHasNoBackground holds the unique world-error code of this error
+const ErrCodeProjectHasNoBackground = 3015
+
+// HTTPError holds the http error description
+func (err *ErrProjectHasNoBackground) HTTPError() web.HTTPError {
+	return web.HTTPError{
+		HTTPCode: http.StatusNotFound,
+		Code:     ErrCodeProjectHasNoBackground,
+		// Message kept verbatim from v1's inline handler error so the wire body is unchanged.
+		Message: "Project background not found",
+	}
+}
+
 // ==============
 // Task errors
 // ==============
@@ -585,6 +614,73 @@ func (err ErrInvalidTaskRepeatInterval) HTTPError() web.HTTPError {
 		HTTPCode: http.StatusBadRequest,
 		Code:     ErrCodeInvalidTaskRepeatInterval,
 		Message:  fmt.Sprintf("The task repeat interval must be between 0 and %d seconds (10 years).", MaxTaskRepeatAfterSeconds),
+	}
+}
+
+// ErrInvalidBulkTaskCreationCount represents an error where a bulk task creation request has no tasks or more than the maximum.
+type ErrInvalidBulkTaskCreationCount struct {
+	Count int
+}
+
+// IsErrInvalidBulkTaskCreationCount checks if an error is ErrInvalidBulkTaskCreationCount.
+func IsErrInvalidBulkTaskCreationCount(err error) bool {
+	_, ok := err.(ErrInvalidBulkTaskCreationCount)
+	return ok
+}
+
+func (err ErrInvalidBulkTaskCreationCount) Error() string {
+	return fmt.Sprintf("Invalid bulk task creation count. [Count: %d]", err.Count)
+}
+
+// ErrCodeInvalidBulkTaskCreationCount holds the unique world-error code of this error.
+const ErrCodeInvalidBulkTaskCreationCount = 4030
+
+// HTTPError holds the http error description.
+func (err ErrInvalidBulkTaskCreationCount) HTTPError() web.HTTPError {
+	return web.HTTPError{
+		HTTPCode: http.StatusBadRequest,
+		Code:     ErrCodeInvalidBulkTaskCreationCount,
+		Message:  fmt.Sprintf("A bulk task creation must contain between 1 and %d tasks, got %d.", MaxTasksPerBulkCreation, err.Count),
+	}
+}
+
+// ErrInvalidTaskInBulkCreation represents an error where one task of a bulk creation batch failed validation, identified by its payload index.
+type ErrInvalidTaskInBulkCreation struct {
+	Index int
+	Err   error
+}
+
+// IsErrInvalidTaskInBulkCreation checks if an error is ErrInvalidTaskInBulkCreation.
+func IsErrInvalidTaskInBulkCreation(err error) bool {
+	_, ok := err.(ErrInvalidTaskInBulkCreation)
+	return ok
+}
+
+func (err ErrInvalidTaskInBulkCreation) Error() string {
+	return fmt.Sprintf("Invalid task in bulk creation. [Index: %d, Error: %v]", err.Index, err.Err)
+}
+
+func (err ErrInvalidTaskInBulkCreation) Unwrap() error {
+	return err.Err
+}
+
+// ErrCodeInvalidTaskInBulkCreation holds the unique world-error code of this error.
+const ErrCodeInvalidTaskInBulkCreation = 4031
+
+// HTTPError holds the http error description.
+func (err ErrInvalidTaskInBulkCreation) HTTPError() web.HTTPError {
+	message := "invalid task"
+	switch e := err.Err.(type) {
+	case web.HTTPErrorProcessor:
+		message = e.HTTPError().Message
+	case ValidationHTTPError:
+		// ValidationHTTPError shadows HTTPErrorProcessor via its embedded field, so it's handled separately.
+		message = strings.Join(e.InvalidFields, ", ")
+	}
+	return web.HTTPError{
+		HTTPCode: http.StatusBadRequest,
+		Code:     ErrCodeInvalidTaskInBulkCreation,
+		Message:  fmt.Sprintf("The task at index %d is invalid: %s", err.Index, message),
 	}
 }
 
@@ -2157,9 +2253,10 @@ const ErrCodeInvalidAPITokenPermission = 14002
 // HTTPError holds the http error description
 func (err *ErrInvalidAPITokenPermission) HTTPError() web.HTTPError {
 	return web.HTTPError{
-		HTTPCode: http.StatusBadRequest,
-		Code:     ErrCodeInvalidAPITokenPermission,
-		Message:  fmt.Sprintf("The permission %s of group %s is invalid.", err.Permission, err.Group),
+		HTTPCode:   http.StatusBadRequest,
+		Code:       ErrCodeInvalidAPITokenPermission,
+		Message:    fmt.Sprintf("The permission %s of group %s is invalid.", err.Permission, err.Group),
+		I18nParams: map[string]string{"permission": err.Permission, "group": err.Group},
 	}
 }
 
@@ -2594,5 +2691,73 @@ func (err ErrTimeEntryEndBeforeStart) HTTPError() web.HTTPError {
 		HTTPCode: http.StatusBadRequest,
 		Code:     ErrCodeTimeEntryEndBeforeStart,
 		Message:  "A time entry's end time cannot be before its start time.",
+	}
+}
+
+// Task Blocking Errors
+
+// ErrTaskIsBlocked represents an error where a user tries to mark a blocked task as complete
+// when the blocking task(s) are not yet complete.
+type ErrTaskIsBlocked struct {
+	TaskID        int64
+	BlockingTasks []*Task
+}
+
+// IsErrTaskIsBlocked checks if an error is ErrTaskIsBlocked.
+func IsErrTaskIsBlocked(err error) bool {
+	_, ok := err.(ErrTaskIsBlocked)
+	return ok
+}
+
+func (err ErrTaskIsBlocked) Error() string {
+	return fmt.Sprintf("task %d is blocked by %d task(s)", err.TaskID, len(err.BlockingTasks))
+}
+
+// ErrCodeTaskIsBlocked holds the unique world-error code of this error
+const ErrCodeTaskIsBlocked = 20001
+
+// HTTPError holds the http error description
+func (err ErrTaskIsBlocked) HTTPError() web.HTTPError {
+	titles := make([]string, 0, len(err.BlockingTasks))
+	for _, t := range err.BlockingTasks {
+		titles = append(titles, t.Title)
+	}
+
+	return web.HTTPError{
+		HTTPCode: http.StatusConflict,
+		Code:     ErrCodeTaskIsBlocked,
+		Message:  err.Error(),
+		I18nParams: map[string]string{
+			"tasks": strings.Join(titles, ", "),
+		},
+	}
+}
+
+// =================
+// User export errors
+// =================
+
+// ErrUserDataExportDoesNotExist represents an error where a user has no ready data export to download.
+type ErrUserDataExportDoesNotExist struct{}
+
+// IsErrUserDataExportDoesNotExist checks if an error is ErrUserDataExportDoesNotExist.
+func IsErrUserDataExportDoesNotExist(err error) bool {
+	_, ok := err.(ErrUserDataExportDoesNotExist)
+	return ok
+}
+
+func (err ErrUserDataExportDoesNotExist) Error() string {
+	return "No user data export found"
+}
+
+// ErrCodeUserDataExportDoesNotExist holds the unique world-error code of this error
+const ErrCodeUserDataExportDoesNotExist = 19001
+
+// HTTPError holds the http error description
+func (err ErrUserDataExportDoesNotExist) HTTPError() web.HTTPError {
+	return web.HTTPError{
+		HTTPCode: http.StatusNotFound,
+		Code:     ErrCodeUserDataExportDoesNotExist,
+		Message:  "No user data export found.",
 	}
 }

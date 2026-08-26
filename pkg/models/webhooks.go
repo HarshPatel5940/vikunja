@@ -40,10 +40,14 @@ import (
 	"code.vikunja.io/api/pkg/version"
 	"code.vikunja.io/api/pkg/web"
 
+	"xorm.io/builder"
 	"xorm.io/xorm"
 )
 
 var webhookClient *http.Client
+
+// The webhook target is user-configured, so its error body is untrusted and can be arbitrarily large.
+const maxWebhookErrorBodySize = 4096
 
 type Webhook struct {
 	// The generated ID of this webhook target
@@ -158,7 +162,7 @@ func GetUserDirectedWebhookEvents() []string {
 // @Security JWTKeyAuth
 // @Param id path int true "Project ID"
 // @Param webhook body models.Webhook true "The webhook target object with required fields"
-// @Success 200 {object} models.Webhook "The created webhook target."
+// @Success 201 {object} models.Webhook "The created webhook target."
 // @Failure 400 {object} web.HTTPError "Invalid webhook object provided."
 // @Failure 500 {object} models.Message "Internal error"
 // @Router /projects/{id}/webhooks [put]
@@ -216,24 +220,36 @@ func (w *Webhook) Create(s *xorm.Session, a web.Auth) (err error) {
 // @Failure 500 {object} models.Message "Internal server error"
 // @Router /projects/{id}/webhooks [get]
 func (w *Webhook) ReadAll(s *xorm.Session, a web.Auth, _ string, page int, perPage int) (result interface{}, resultCount int, numberOfTotalItems int64, err error) {
-	p := &Project{ID: w.ProjectID}
-	can, _, err := p.CanRead(s, a)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	if !can {
-		return nil, 0, 0, ErrGenericForbidden{}
+	// w.UserID set selects the user-level list: a user may only see their own
+	// webhooks. The project list (w.UserID == 0) delegates to the project's read
+	// permission instead.
+	var listCond builder.Cond
+	if w.UserID > 0 {
+		if _, isShareAuth := a.(*LinkSharing); isShareAuth || w.UserID != a.GetID() {
+			return nil, 0, 0, ErrGenericForbidden{}
+		}
+		listCond = builder.Eq{"user_id": w.UserID}
+	} else {
+		p := &Project{ID: w.ProjectID}
+		can, _, cerr := p.CanRead(s, a)
+		if cerr != nil {
+			return nil, 0, 0, cerr
+		}
+		if !can {
+			return nil, 0, 0, ErrGenericForbidden{}
+		}
+		listCond = builder.Eq{"project_id": w.ProjectID}
 	}
 
 	ws := []*Webhook{}
-	err = s.Where("project_id = ?", w.ProjectID).
+	err = s.Where(listCond).
 		Limit(getLimitFromPageIndex(page, perPage)).
 		Find(&ws)
 	if err != nil {
 		return
 	}
 
-	total, err := s.Where("project_id = ?", w.ProjectID).
+	total, err := s.Where(listCond).
 		Count(&Webhook{})
 	if err != nil {
 		return
@@ -357,7 +373,7 @@ func (w *Webhook) sendWebhookPayload(p *WebhookPayload) (err error) {
 	defer res.Body.Close()
 
 	if res.StatusCode > 399 {
-		responseBody, readErr := io.ReadAll(res.Body)
+		responseBody, readErr := io.ReadAll(io.LimitReader(res.Body, maxWebhookErrorBodySize))
 		if readErr != nil {
 			return fmt.Errorf("webhook %d returned status %d and reading its body failed: %w", w.ID, res.StatusCode, readErr)
 		}

@@ -13,12 +13,12 @@
 			@keyup.enter="openTaskDetail"
 		>
 			<span
-				v-tooltip="!canMarkAsDone ? $t('task.readOnlyCheckbox') : ''"
+				v-tooltip="checkboxTooltip"
 				class="is-inline-flex is-align-items-center"
 			>
 				<FancyCheckbox
 					v-model="task.done"
-					:disabled="isArchived || disabled || !canMarkAsDone"
+					:disabled="isArchived || disabled || !canMarkAsDone || isBlockedByIncomplete"
 					:aria-label="$t('task.detail.markAsDone', {task: task.title})"
 					@update:modelValue="markAsDone"
 					@click.stop
@@ -64,7 +64,6 @@
 							ref="taskLinkRef"
 							:to="taskDetailRoute"
 							class="task-link"
-							tabindex="-1"
 						>
 							{{ task.title }}
 						</RouterLink>
@@ -116,6 +115,8 @@
 					<span
 						v-if="task.attachments.length > 0"
 						class="project-task-icon"
+						role="img"
+						:aria-label="$t('task.attributes.attachment', task.attachments.length)"
 					>
 						<Icon icon="paperclip" />
 					</span>
@@ -219,7 +220,7 @@ import Popup from '@/components/misc/Popup.vue'
 import TaskService from '@/services/task'
 
 import {formatDisplayDate, formatISO, formatDateLong} from '@/helpers/time/formatDate'
-import {success} from '@/message'
+import {success, error} from '@/message'
 
 import {useProjectStore} from '@/stores/projects'
 import {useBaseStore} from '@/stores/base'
@@ -230,6 +231,7 @@ import {playPopSound} from '@/helpers/playPop'
 import {isEditorContentEmpty} from '@/helpers/editorContentEmpty'
 import {TASK_REPEAT_MODES} from '@/types/IRepeatMode'
 import {useGlobalNow} from '@/composables/useGlobalNow'
+import {useTaskBlockedByIncomplete} from '@/composables/useTaskBlockedByIncomplete'
 
 const props = withDefaults(defineProps<{
 	theTask: ITask,
@@ -323,13 +325,40 @@ const isOverdue = computed(() => (
 	task.value.dueDate.getTime() <= now.value.getTime()
 ))
 
+const isBlockedByIncomplete = useTaskBlockedByIncomplete(task)
+const checkboxTooltip = computed(() => {
+	if (!props.canMarkAsDone) {
+		return t('task.readOnlyCheckbox')
+	}
+
+	if (isBlockedByIncomplete.value) {
+		return t('task.blockedCheckbox')
+	}
+
+	return ''
+})
+
 let oldTask
 
 async function markAsDone(checked: boolean, wasReverted: boolean = false) {
-	const updateFunc = async () => {
-		oldTask = {...task.value}
-		const newTask = await taskStore.update(task.value)
-		task.value = newTask
+	oldTask = {...task.value}
+
+	// Fire the request immediately and with the intended done value snapshotted, so a re-render or
+	// teardown during the animation delay can neither drop the save nor make it send a stale state.
+	const updatePromise = taskStore.update({
+		...task.value,
+		done: checked,
+	})
+
+	const finish = async () => {
+		try {
+			const newTask = await updatePromise
+			task.value = newTask
+		} catch (e) {
+			task.value.done = !checked
+			error(e)
+			return
+		}
 
 		updateDueDate()
 
@@ -340,7 +369,7 @@ async function markAsDone(checked: boolean, wasReverted: boolean = false) {
 		if (checked) {
 			playPopSound()
 		}
-		emit('taskUpdated', newTask)
+		emit('taskUpdated', task.value)
 
 		let message = t('task.doneSuccess')
 		if (!task.value.done && !isRepeating.value) {
@@ -354,9 +383,9 @@ async function markAsDone(checked: boolean, wasReverted: boolean = false) {
 	}
 
 	if (checked) {
-		setTimeout(updateFunc, 300) // Delay it to show the animation when marking a task as done
+		setTimeout(finish, 300) // Delay only the follow-up to show the animation when marking a task as done
 	} else {
-		await updateFunc() // Don't delay it when un-marking it as it doesn't have an animation the other way around
+		await finish() // Don't delay it when un-marking it as it doesn't have an animation the other way around
 	}
 }
 
@@ -461,7 +490,7 @@ defineExpose({
 	}
 
 	&[data-is-overdue] .dueDate {
-		color: var(--danger);
+		color: var(--danger-text);
 	}
 
 	.task-project {
